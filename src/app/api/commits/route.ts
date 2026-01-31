@@ -12,9 +12,10 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const username = searchParams.get("username");
     const fromDate = searchParams.get("from");
+    const toDateParam = searchParams.get("to");
     const reposParam = searchParams.get("repos");
     const isOrg = searchParams.get("isOrg") === "true";
-    
+
     if (!username || !fromDate || !reposParam) {
       return NextResponse.json(
         { error: "Missing required parameters" },
@@ -26,6 +27,14 @@ export async function GET(request: Request) {
     if (isNaN(startDate.getTime())) {
       return NextResponse.json(
         { error: "Invalid date format" },
+        { status: 400 }
+      );
+    }
+
+    const endDate = toDateParam ? new Date(toDateParam) : undefined;
+    if (toDateParam && isNaN(endDate!.getTime())) {
+      return NextResponse.json(
+        { error: "Invalid to date format" },
         { status: 400 }
       );
     }
@@ -55,8 +64,8 @@ export async function GET(request: Request) {
         try {
           for (let i = 0; i < repos.length; i += BATCH_SIZE) {
             const batch = repos.slice(i, i + BATCH_SIZE);
-            const batchPromises = batch.map((repo: string) => 
-              fetchRepoCommits(repo, env.GITHUB_TOKEN, startDate)
+            const batchPromises = batch.map((repo: string) =>
+              fetchRepoCommits(repo, env.GITHUB_TOKEN, startDate, endDate)
                 .catch(error => {
                   console.error(`Error fetching commits for ${repo}:`, error);
                   return null;

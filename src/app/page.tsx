@@ -30,6 +30,8 @@ export default function HomePage() {
   const [username, setUsername] = useState("");
   const [timeframe, setTimeframe] = useState("week");
   const [customDays, setCustomDays] = useState("1");
+  const [customFromDate, setCustomFromDate] = useState("");
+  const [customToDate, setCustomToDate] = useState("");
   const [commits, setCommits] = useState<{
     defaultBranch: EnrichedCommit[];
     otherBranches: EnrichedCommit[];
@@ -52,6 +54,7 @@ export default function HomePage() {
   const [shareUrl, setShareUrl] = useState<string>("");
   const [showNotification, setShowNotification] = useState(false);
   const [lastRequestTime, setLastRequestTime] = useState<number | null>(null);
+  const [summaryCopied, setSummaryCopied] = useState(false);
 
   const allCommits = useMemo(() => {
     const commitMap = new Map<string, EnrichedCommit>();
@@ -139,7 +142,7 @@ export default function HomePage() {
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [username, timeframe, customDays]);
+  }, [username, timeframe, customDays, customFromDate, customToDate]);
 
   useEffect(() => {
     async function f() {
@@ -147,6 +150,8 @@ export default function HomePage() {
       const urlUsername = params.get('username');
       const urlTimeframe = params.get('timeframe');
       const urlCustomDays = params.get('customDays');
+      const urlFromDate = params.get('fromDate');
+      const urlToDate = params.get('toDate');
 
       if (urlUsername) {
         setUsername(urlUsername)
@@ -156,12 +161,16 @@ export default function HomePage() {
         if (urlTimeframe == 'custom' && urlCustomDays) {
           setCustomDays(urlCustomDays)
         }
+        if (urlTimeframe == 'range' && urlFromDate && urlToDate) {
+          setCustomFromDate(urlFromDate)
+          setCustomToDate(urlToDate)
+        }
         fetchCommits();
       }
     }
 
     f().catch(console.error);
-  }, [username, timeframe, customDays]);
+  }, [username, timeframe, customDays, customFromDate, customToDate]);
 
   async function checkIfOrganization(name: string): Promise<boolean> {
     setProgress({ stage: 'checking-type' });
@@ -281,12 +290,16 @@ export default function HomePage() {
     return Array.from(repoSet);
   }
 
-  async function fetchIssuesAndPRs(fromDate: Date, isOrg: boolean) {
+  async function fetchIssuesAndPRs(fromDate: Date, toDate: Date | undefined, isOrg: boolean) {
     setIssuesAndPRs([]);
     setProgress(prev => ({ ...prev, stage: 'fetching-issues', message: 'Fetching issues and pull requests...' }));
     try {
+      const fromDateStr = fromDate.toISOString().split('T')[0];
+      const toDateStr = toDate ? toDate.toISOString().split('T')[0] : undefined;
+      const dateRange = toDateStr ? `${fromDateStr}..${toDateStr}` : `>=${fromDateStr}`;
+
       if (isOrg) {
-        const query = `org:${username} updated:>=${fromDate.toISOString().split('T')[0]}`;
+        const query = `org:${username} updated:${dateRange}`;
         let allItems: any[] = [];
         let page = 1;
         let hasMore = true;
@@ -308,7 +321,7 @@ export default function HomePage() {
 
           const data = await response.json();
           allItems = [...allItems, ...(data.items || [])];
-          
+
           hasMore = data.items?.length === 100;
           page++;
           setProgress(prev => prev?.stage === 'fetching-issues'
@@ -328,7 +341,7 @@ export default function HomePage() {
       while (hasMore) {
         const response = await fetch(
           `https://api.github.com/search/issues?${new URLSearchParams({
-            q: `author:${username} created:>=${fromDate.toISOString().split('T')[0]}`,
+            q: `author:${username} created:${dateRange}`,
             sort: 'created',
             order: 'desc',
             per_page: '100',
@@ -342,7 +355,7 @@ export default function HomePage() {
 
         const data = await response.json();
         allItems = [...allItems, ...data.items];
-        
+
         hasMore = data.items?.length === 100;
         page++;
         setProgress(prev => prev?.stage === 'fetching-issues'
@@ -408,6 +421,23 @@ export default function HomePage() {
       }
     }
 
+    if (timeframe === "range") {
+      if (!customFromDate || !customToDate) {
+        setError("Please select both from and to dates");
+        return;
+      }
+      const from = new Date(customFromDate);
+      const to = new Date(customToDate);
+      if (isNaN(from.getTime()) || isNaN(to.getTime())) {
+        setError("Please enter valid dates");
+        return;
+      }
+      if (from > to) {
+        setError("From date must be before to date");
+        return;
+      }
+    }
+
     setError("");
     setExportError("");
     setSummaryError("");
@@ -449,7 +479,8 @@ export default function HomePage() {
       setIsOrganization(isOrg);
 
       const now = new Date();
-      const fromDate = new Date();
+      let fromDate = new Date();
+      let toDate: Date | undefined = undefined;
 
       switch (effectiveTimeframe) {
         case "24h":
@@ -466,6 +497,12 @@ export default function HomePage() {
           break;
         case "custom":
           fromDate.setDate(now.getDate() - Number(customDays));
+          break;
+        case "range":
+          fromDate = new Date(customFromDate);
+          // Set to end of the selected day
+          toDate = new Date(customToDate);
+          toDate.setHours(23, 59, 59, 999);
           break;
       }
 
@@ -485,13 +522,18 @@ export default function HomePage() {
         message: 'Starting to process repositories...'
       });
 
+      const params: Record<string, string> = {
+        username,
+        from: fromDate.toISOString(),
+        repos: JSON.stringify(repos),
+        isOrg: isOrg.toString()
+      };
+      if (toDate) {
+        params.to = toDate.toISOString();
+      }
+
       const response = await fetch(
-        `/api/commits?${new URLSearchParams({
-          username,
-          from: fromDate.toISOString(),
-          repos: JSON.stringify(repos),
-          isOrg: isOrg.toString()
-        })}`
+        `/api/commits?${new URLSearchParams(params)}`
       );
 
       if (!response.ok) {
@@ -556,7 +598,7 @@ export default function HomePage() {
       });
 
       try {
-        await fetchIssuesAndPRs(fromDate, isOrg);
+        await fetchIssuesAndPRs(fromDate, toDate, isOrg);
       } catch (err) {
         console.error('Error fetching issues and PRs:', err);
         setIssuesAndPRs([]);
@@ -657,8 +699,8 @@ export default function HomePage() {
     }
 
     try {
-      const now = new Date();
-      const fromDate = new Date();
+      let now = new Date();
+      let fromDate = new Date();
 
       switch (timeframe) {
         case "24h":
@@ -678,6 +720,14 @@ export default function HomePage() {
             throw new Error("Invalid number of days");
           }
           fromDate.setDate(now.getDate() - Number(customDays));
+          break;
+        case "range":
+          if (!customFromDate || !customToDate) {
+            throw new Error("Invalid date range");
+          }
+          fromDate = new Date(customFromDate);
+          now = new Date(customToDate);
+          now.setHours(23, 59, 59, 999);
           break;
       }
 
@@ -774,7 +824,13 @@ export default function HomePage() {
       <div className="w-full max-w-4xl">
         <h1 className="mb-8 text-center text-4xl font-bold">
           {username ? (
-            <>What {isOrganization ? 'happened in' : 'did'} <span className="font-bold text-blue-400">{username}</span> {isOrganization ? 'in' : 'do in'} the last {timeframe === "custom" ? `${customDays} day${Number(customDays) > 1 ? 's' : ''}` : timeframe}?</>
+            <>What {isOrganization ? 'happened in' : 'did'} <span className="font-bold text-blue-400">{username}</span> {isOrganization ? 'in' : 'do in'} {
+              timeframe === "custom"
+                ? `the last ${customDays} day${Number(customDays) > 1 ? 's' : ''}`
+                : timeframe === "range"
+                  ? `${customFromDate} to ${customToDate}`
+                  : `the last ${timeframe}`
+            }?</>
           ) : (
             "What did you get done?"
           )}
@@ -822,6 +878,7 @@ export default function HomePage() {
             <option value="month">Past Month</option>
             <option value="year">Past Year</option>
             <option value="custom">Custom Days</option>
+            <option value="range">Date Range</option>
           </select>
 
           {timeframe === "custom" && (
@@ -850,6 +907,38 @@ export default function HomePage() {
               placeholder="Number of days (1-1000)"
               className="w-32 rounded-lg bg-white/10 px-4 py-2 text-white focus:outline-none"
             />
+          )}
+
+          {timeframe === "range" && (
+            <>
+              <input
+                type="date"
+                value={customFromDate}
+                onChange={(e) => {
+                  setCustomFromDate(e.target.value);
+                  setCommits({ defaultBranch: [], otherBranches: [] });
+                  setIssuesAndPRs([]);
+                  setSummary("");
+                  setHasSearched(false);
+                  window.history.pushState(null, '', '/');
+                }}
+                className="rounded-lg bg-white/10 px-4 py-2 text-white focus:outline-none [color-scheme:dark]"
+              />
+              <span className="text-white/60">to</span>
+              <input
+                type="date"
+                value={customToDate}
+                onChange={(e) => {
+                  setCustomToDate(e.target.value);
+                  setCommits({ defaultBranch: [], otherBranches: [] });
+                  setIssuesAndPRs([]);
+                  setSummary("");
+                  setHasSearched(false);
+                  window.history.pushState(null, '', '/');
+                }}
+                className="rounded-lg bg-white/10 px-4 py-2 text-white focus:outline-none [color-scheme:dark]"
+              />
+            </>
           )}
 
           <button
@@ -997,7 +1086,39 @@ export default function HomePage() {
               )}
 
               {summary && (
-                <div className="rounded-lg bg-white/10 p-6">
+                <div className="relative rounded-lg bg-white/10 p-6">
+                  <button
+                    onClick={async () => {
+                      try {
+                        const timeframeText = timeframe === "custom"
+                          ? `the last ${customDays} day${Number(customDays) > 1 ? 's' : ''}`
+                          : timeframe === "range"
+                            ? `${customFromDate} to ${customToDate}`
+                            : `the last ${timeframe}`;
+                        const title = isOrganization
+                          ? `What happened in ${username} in ${timeframeText}?`
+                          : `What did ${username} do in ${timeframeText}?`;
+                        const markdownContent = `# ${title}\n\n${summary}`;
+                        await navigator.clipboard.writeText(markdownContent);
+                        setSummaryCopied(true);
+                        setTimeout(() => setSummaryCopied(false), 2000);
+                      } catch (err) {
+                        console.error('Failed to copy summary:', err);
+                      }
+                    }}
+                    className="absolute top-3 right-3 rounded-lg bg-white/10 p-2 text-white/60 hover:bg-white/20 hover:text-white transition-colors"
+                    title="Copy summary"
+                  >
+                    {summaryCopied ? (
+                      <svg className="w-5 h-5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                    ) : (
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                      </svg>
+                    )}
+                  </button>
                   <div className="prose prose-invert max-w-none
                     prose-p:text-white/80
                     prose-ul:text-white/80 

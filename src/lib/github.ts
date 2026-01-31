@@ -103,6 +103,7 @@ const FETCH_REPO_COMMITS_QUERY = `
     $owner: String!
     $repo: String!
     $since: GitTimestamp!
+    $until: GitTimestamp
     $branchCursor: String
     $commitCursor: String
   ) {
@@ -113,8 +114,8 @@ const FETCH_REPO_COMMITS_QUERY = `
         name
       }
       refs(
-        first: 25, 
-        refPrefix: "refs/heads/", 
+        first: 25,
+        refPrefix: "refs/heads/",
         after: $branchCursor,
         orderBy: {field: TAG_COMMIT_DATE, direction: DESC}
       ) {
@@ -122,7 +123,7 @@ const FETCH_REPO_COMMITS_QUERY = `
           name
           target {
             ... on Commit {
-              history(first: 100, since: $since, after: $commitCursor) {
+              history(first: 100, since: $since, until: $until, after: $commitCursor) {
                 nodes {
                   messageHeadline
                   oid
@@ -158,14 +159,16 @@ export async function fetchRepoCommits(
   repoWithOwner: string,
   token: string,
   fromDate: Date,
+  toDate?: Date,
   branchCursor?: string,
   commitCursor?: string
 ): Promise<RepoCommitsResponse> {
   const [owner, repo] = repoWithOwner.split('/');
-  const variables = {
+  const variables: Record<string, string | undefined> = {
     owner,
     repo,
     since: fromDate.toISOString().split('.')[0]+"Z",
+    until: toDate ? toDate.toISOString().split('.')[0]+"Z" : undefined,
     branchCursor,
     commitCursor,
   };
