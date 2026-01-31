@@ -1,21 +1,25 @@
 import { Anthropic } from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { EnrichedCommit } from '../../../lib/github';
 import { NextResponse } from 'next/server';
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+const anthropic = process.env.ANTHROPIC_API_KEY
+  ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+  : null;
 
-const grok = new OpenAI({
-  apiKey: process.env.GROK_API_KEY,
-  baseURL: "https://api.x.ai/v1",
-});
+const grok = process.env.GROK_API_KEY
+  ? new OpenAI({ apiKey: process.env.GROK_API_KEY, baseURL: "https://api.x.ai/v1" })
+  : null;
+
+const genAI = process.env.GEMINI_API_KEY
+  ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
+  : null;
 
 export const runtime = 'edge';
 
 export async function POST(req: Request) {
-  if (!process.env.ANTHROPIC_API_KEY && !process.env.GROK_API_KEY) {
+  if (!process.env.GEMINI_API_KEY && !process.env.ANTHROPIC_API_KEY && !process.env.GROK_API_KEY) {
     return new NextResponse('No AI service API keys configured', { status: 500 });
   }
 
@@ -91,8 +95,51 @@ Remember to keep your summary technical, concise, and focused on the most signif
 
     const encoder = new TextEncoder();
 
-    try {
-      if (process.env.ANTHROPIC_API_KEY) {
+    // Try Gemini first (primary)
+    if (genAI) {
+      try {
+        const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
+        const result = await model.generateContentStream({
+          contents: [
+            {
+              role: 'user',
+              parts: [{ text: `${system_prompt}\n\n${prompt}\n\nRespond with <contribution_breakdown> tags as specified.` }],
+            },
+          ],
+          generationConfig: {
+            temperature: 0.8,
+            maxOutputTokens: 4000,
+          },
+        });
+
+        const customStream = new ReadableStream({
+          async start(controller) {
+            for await (const chunk of result.stream) {
+              const content = chunk.text();
+              if (content) {
+                controller.enqueue(encoder.encode(content));
+              }
+            }
+            controller.enqueue(encoder.encode('[DONE]'));
+            controller.close();
+          },
+        });
+
+        return new NextResponse(customStream, {
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+          },
+        });
+      } catch (error) {
+        console.error('Gemini error, falling back:', error);
+      }
+    }
+
+    // Fallback to Anthropic
+    if (anthropic) {
+      try {
         const stream = await anthropic.messages.create({
           model: 'claude-3-5-sonnet-20241022',
           max_tokens: 4000,
@@ -131,10 +178,14 @@ Remember to keep your summary technical, concise, and focused on the most signif
             'Connection': 'keep-alive',
           },
         });
+      } catch (error) {
+        console.error('Anthropic error, falling back:', error);
       }
-    } catch (error) {
-      // fallback to grok
-      if (process.env.GROK_API_KEY) {
+    }
+
+    // Fallback to Grok
+    if (grok) {
+      try {
         const stream = await grok.chat.completions.create({
           model: 'grok-2-latest',
           messages: [
@@ -170,10 +221,12 @@ Remember to keep your summary technical, concise, and focused on the most signif
             'Connection': 'keep-alive',
           },
         });
+      } catch (error) {
+        console.error('Grok error:', error);
       }
-      
-      throw new Error('All AI services failed');
     }
+
+    throw new Error('All AI services failed');
   } catch (error) {
     console.error('Error:', error);
     return new NextResponse(
